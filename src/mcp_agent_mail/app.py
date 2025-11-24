@@ -1576,6 +1576,40 @@ async def _get_or_create_agent(
 
 
 async def _get_agent(project: Project, name: str) -> Agent:
+    """Get active agent by name, excluding deregistered agents."""
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(
+                Agent.project_id == project.id,
+                func.lower(Agent.name) == name.lower(),
+                Agent.deregistered_ts.is_(None),
+            )
+        )
+        agent = result.scalars().first()
+        if not agent:
+            # Check if agent exists but is deregistered
+            dereg_result = await session.execute(
+                select(Agent).where(
+                    Agent.project_id == project.id,
+                    func.lower(Agent.name) == name.lower(),
+                    Agent.deregistered_ts.isnot(None),
+                )
+            )
+            if dereg_result.scalars().first():
+                raise NoResultFound(
+                    f"Agent '{name}' was deregistered from project '{project.human_key}'. "
+                    f"Re-register with register_agent to reactivate."
+                )
+            raise NoResultFound(
+                f"Agent '{name}' not registered for project '{project.human_key}'. "
+                f"Tip: Use resource://agents/{project.slug} to discover registered agents."
+            )
+        return agent
+
+
+async def _get_agent_including_deregistered(project: Project, name: str) -> Agent:
+    """Get agent by name, including deregistered agents (for whois/audit)."""
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
@@ -2740,7 +2774,8 @@ def build_mcp_server() -> FastMCP:
             Agent profile augmented with { recent_commits: [{hexsha, summary, authored_ts}] } when requested.
         """
         project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
+        # Use _get_agent_including_deregistered to allow whois on deregistered agents (audit/history)
+        agent = await _get_agent_including_deregistered(project, agent_name)
         profile = _agent_to_dict(agent)
         recent: list[dict[str, Any]] = []
         if include_recent_commits:
@@ -4128,7 +4163,7 @@ def build_mcp_server() -> FastMCP:
         agent_arg="agent_name",
     )
     async def list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
-        """List contact links for an agent in a project."""
+        """List contact links for an agent in a project (excludes deregistered contacts)."""
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
         out: list[dict[str, Any]] = []
@@ -4136,7 +4171,11 @@ def build_mcp_server() -> FastMCP:
             rows = await s.execute(
                 select(AgentLink, Agent.name)
                 .join(Agent, Agent.id == AgentLink.b_agent_id)
-                .where(AgentLink.a_project_id == project.id, AgentLink.a_agent_id == agent.id)
+                .where(
+                    AgentLink.a_project_id == project.id,
+                    AgentLink.a_agent_id == agent.id,
+                    Agent.deregistered_ts.is_(None),  # Filter out deregistered contacts
+                )
             )
             for link, name in rows.all():
                 out.append({
@@ -6713,9 +6752,12 @@ def build_mcp_server() -> FastMCP:
         await ensure_schema()
 
         async with get_session() as session:
-            # Get all agents in the project
+            # Get all active (non-deregistered) agents in the project
             result = await session.execute(
-                select(Agent).where(Agent.project_id == project.id).order_by(desc(Agent.last_active_ts))
+                select(Agent).where(
+                    Agent.project_id == project.id,
+                    Agent.deregistered_ts.is_(None),
+                ).order_by(desc(Agent.last_active_ts))
             )
             agents = result.scalars().all()
 
