@@ -613,7 +613,7 @@ def _project_to_dict(project: Project) -> dict[str, Any]:
 
 
 def _agent_to_dict(agent: Agent) -> dict[str, Any]:
-    return {
+    result = {
         "id": agent.id,
         "name": agent.name,
         "program": agent.program,
@@ -624,6 +624,9 @@ def _agent_to_dict(agent: Agent) -> dict[str, Any]:
         "project_id": agent.project_id,
         "attachments_policy": getattr(agent, "attachments_policy", "auto"),
     }
+    if agent.deregistered_ts is not None:
+        result["deregistered_ts"] = _iso(agent.deregistered_ts)
+    return result
 
 
 def _message_to_dict(message: Message, include_body: bool = True) -> dict[str, Any]:
